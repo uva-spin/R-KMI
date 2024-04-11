@@ -5,7 +5,7 @@ import tensorflow as tf
 from sklearn.model_selection import RepeatedKFold, train_test_split
 from tensorflow_addons.activations import tanhshrink
 from tensorflow_addons.optimizers import AdamW
-sys.path.append('../../')
+sys.path.append('../')
 from Formulation.BHDVCS_tf_modified import BHDVCStf
 import matplotlib.pyplot as plt
 import time
