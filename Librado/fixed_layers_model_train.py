@@ -7,6 +7,7 @@ import argparse
 import ast
 
 from sklearn.model_selection import RepeatedKFold, train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from tensorflow_addons.activations import tanhshrink
 from tensorflow_addons.optimizers import AdamW
 print(sys.path)
@@ -22,7 +23,7 @@ bkm10 = BHDVCStf()
 
 # Parse arguments from command line
 parser = argparse.ArgumentParser(description='Train the BHDVCS model with given parameters.')
-parser.add_argument('--activation', type=str, help='Activation function', required=True)
+parser.add_argument('--activation', type=str, help='Activation function list', required=True)
 parser.add_argument('--learning_rate', type=float, help='Learning rate for optimizer', required=True)
 parser.add_argument('--batch_size', type=int, help='Batch size for training', required=True)
 parser.add_argument('--epochs', type=int, help='Number of epochs', required=True)
@@ -92,19 +93,18 @@ def gen_replica(pseudo):
 def build_model():
     model = tf.keras.Sequential()
     nodes_per_layer = ast.literal_eval(args.nodes_per_layer)
+    print(f"nodes_per_layer: ", nodes_per_layer)
+    activation_functions = ast.literal_eval(args.activation)
+    print(f"activation: ", activation_functions)
     
-    # Ensure that nodes_per_layer is a list and has at least one element
-    if isinstance(nodes_per_layer, list) and len(nodes_per_layer) > 0:
-        # First layer needs to specify input_shape
-        model.add(tf.keras.layers.Dense(nodes_per_layer[0], activation=args.activation, input_shape=(3,)))
+    if isinstance(nodes_per_layer, list) and len(nodes_per_layer) > 0 and isinstance(activation_functions, list) and len(activation_functions) == len(nodes_per_layer):
+        model.add(tf.keras.layers.Dense(nodes_per_layer[0], activation=activation_functions[0], input_shape=(3,)))
         
-        # Add remaining layers
-        for nodes in nodes_per_layer[1:]:
-            model.add(tf.keras.layers.Dense(nodes, activation=args.activation))
+        for nodes, activation in zip(nodes_per_layer[1:], activation_functions[1:]):
+            model.add(tf.keras.layers.Dense(nodes, activation=activation))
     else:
-        raise ValueError("nodes_per_layer must be a non-empty list")
+        raise ValueError("nodes_per_layer and activation_function must be lists of the same length and non-empty")
     
-    # Output layer, adjust according to your needs
     model.add(tf.keras.layers.Dense(4, activation='linear'))
     
     return model
@@ -271,7 +271,10 @@ def fit_replica(i, pseudo):
     print(sys.path)
     tf.keras.models.save_model(model, 'models/fit_replica_'+str(i)+'.keras') # need "tf.keras.models.save_model" to save custom layer
     np.save(f'{args.output_dir}/models/history_fit_replica_'+str(i)+'.npy',history) 
-
+    
+    final_predictions = model.predict(kin3_norm)
+    np.save(f'{args.output_dir}/models/final_predictions_replica_{i}.npy', final_predictions)
+    
     predictions_results = np.array(predictions_results)
     
     # Draw loss metrics and predition for only the first set for visualization as a function of the number of epochs.
@@ -359,8 +362,131 @@ except ValueError:
     print("Error: nodes_per_layer argument must be a valid list representation.")
     sys.exit(1)
 
+all_predictions = []
+
+# Load predictions for each replica
+for i in range(NUM_OF_REPLICAS):
+    predictions = np.load(f'{args.output_dir}/models/final_predictions_replica_{i}.npy')
+    all_predictions.append(predictions)
+comparison_plots_dir = f'{args.output_dir}/comparison_plots'
+os.makedirs(comparison_plots_dir, exist_ok=True)
+print(comparison_plots_dir)
+
+all_predictions = np.array(all_predictions)  # Shape should be (NUM_OF_REPLICAS, num_samples, 4)
+
+# Real CFF values (assuming these are available in your dataset)
+real_cffs = np.array([pseudo['ReH'], pseudo['ReE'], pseudo['ReHtilde'], pseudo['dvcs']]).transpose()
+
+# Function to plot and save histograms
+def plot_and_save_histogram(predictions, real_values, label, title, filename):
+    plt.figure()
+    plt.hist(predictions, bins=50, alpha=0.5, label=f'Predicted {label}')
+    plt.hist(real_values, bins=50, alpha=0.5, label=f'Actual {label}')
+    plt.xlabel(f'{label} Value')
+    plt.ylabel('Frequency')
+    plt.legend()
+    plt.title(title)
+    plt.savefig(os.path.join(comparison_plots_dir, filename))
+    plt.close()
+
+# Plot and save histograms for each CFF component
+plot_and_save_histogram(all_predictions[:, :, 0].flatten(), real_cffs[:, 0], 'ReH', 'Histogram of Predicted vs. Actual ReH', 'ReH_comparison.png')
+plot_and_save_histogram(all_predictions[:, :, 1].flatten(), real_cffs[:, 1], 'ReE', 'Histogram of Predicted vs. Actual ReE', 'ReE_comparison.png')
+plot_and_save_histogram(all_predictions[:, :, 2].flatten(), real_cffs[:, 2], 'ReHtilde', 'Histogram of Predicted vs. Actual ReHtilde', 'ReHtilde_comparison.png')
+plot_and_save_histogram(all_predictions[:, :, 3].flatten(), real_cffs[:, 3], 'DVCS', 'Histogram of Predicted vs. Actual DVCS', 'DVCS_comparison.png')
+
+output_dir = args.output_dir
+csv_output_path = f'{output_dir}/model_performance_metrics.csv'
+os.makedirs(output_dir, exist_ok=True)
+
+# Function to plot and save scatter plots with vertical error bars for predicted values and scatter points for actual values
+def plot_and_save_scatter_with_error_bars(predictions, real_values, label, title, filename):
+    plt.figure(figsize=(10, 6))
+
+    # Convert real values to an array to handle multiple real values correctly
+    real_values = np.array(real_values)
+
+    # Calculate the mean and standard deviation of predictions
+    mean_predictions = np.mean(predictions, axis=0)
+    std_predictions = np.std(predictions, axis=0)
+
+    # Plot predicted values with error bars
+    x_values = np.arange(len(mean_predictions))
+    plt.errorbar(x_values, mean_predictions, yerr=std_predictions, fmt='o', label=f'Predicted {label} (mean ± std)', color='blue', alpha=0.7)
+
+    # Plot actual values as scatter points
+    plt.scatter(x_values, real_values, color='red', label=f'Actual {label}', alpha=0.9, edgecolors='k', zorder=5)
+
+    plt.xlabel('Data Points')
+    plt.ylabel(f'{label} Value')
+    plt.legend()
+    plt.title(title)
+    plt.grid(True)
+    plt.savefig(os.path.join(comparison_plots_dir, filename))
+    plt.close()
+
+# Ensure the directory for saving comparison plots exists
+comparison_plots_dir = f'{args.output_dir}/comparison_plots'
+os.makedirs(comparison_plots_dir, exist_ok=True)
+
+# Assuming all_predictions and real_cffs are already defined
+# all_predictions.shape = (NUM_OF_REPLICAS, num_samples, 4)
+# real_cffs.shape = (num_samples, 4)
+
+# Flatten the predictions and real values for comparison
+all_predictions_flat = all_predictions.reshape(NUM_OF_REPLICAS, -1, 4)
+real_cffs_flat = real_cffs.repeat(NUM_OF_REPLICAS, axis=0)
+
+# Plot and save scatter plots with error bars for each CFF component
+plot_and_save_scatter_with_error_bars(all_predictions_flat[:, :, 0], real_cffs[:, 0], 'ReH', 'Scatter Plot of Predicted vs. Actual ReH', 'ReH_scatter.png')
+plot_and_save_scatter_with_error_bars(all_predictions_flat[:, :, 1], real_cffs[:, 1], 'ReE', 'Scatter Plot of Predicted vs. Actual ReE', 'ReE_scatter.png')
+plot_and_save_scatter_with_error_bars(all_predictions_flat[:, :, 2], real_cffs[:, 2], 'ReHtilde', 'Scatter Plot of Predicted vs. Actual ReHtilde', 'ReHtilde_scatter.png')
+plot_and_save_scatter_with_error_bars(all_predictions_flat[:, :, 3], real_cffs[:, 3], 'DVCS', 'Scatter Plot of Predicted vs. Actual DVCS', 'DVCS_scatter.png')
+
+
+# Assuming all_predictions and real_cffs are already defined
+# all_predictions.shape = (NUM_OF_REPLICAS, num_samples, 4)
+# real_cffs.shape = (num_samples, 4)
+
+# Flatten the predictions and real values for comparison
+all_predictions_flat = all_predictions.reshape(-1, 4)
+real_cffs_flat = real_cffs.repeat(NUM_OF_REPLICAS, axis=0)
+
+# Function to compute metrics for a single CFF component
+def compute_metrics(predictions, actuals):
+    mae = mean_absolute_error(actuals, predictions)
+    rmse = np.sqrt(mean_squared_error(actuals, predictions))
+    r2 = r2_score(actuals, predictions)
+    mape = np.mean(np.abs((actuals - predictions) / actuals)) * 100
+    std_error = np.std(actuals - predictions)
+    corr = np.corrcoef(actuals, predictions)[0, 1]
+    return {
+        'MAE': mae,
+        'RMSE': rmse,
+        'R-squared': r2,
+        'MAPE (%)': mape,
+        'Std Error': std_error,
+        'Correlation': corr
+    }
+
+# Compute metrics for each CFF component
+metrics = {
+    'Metric': ['MAE', 'RMSE', 'R-squared', 'MAPE (%)', 'Std Error', 'Correlation']
+}
+
+for i, label in enumerate(['ReH', 'ReE', 'ReHtilde', 'DVCS']):
+    component_metrics = compute_metrics(all_predictions_flat[:, i], real_cffs_flat[:, i])
+    metrics[label] = list(component_metrics.values())
+
+# Convert metrics to DataFrame
+metrics_df = pd.DataFrame(metrics)
+
+# Save to CSV
+metrics_df.to_csv(csv_output_path, index=False)
+
+print(f"Performance metrics saved to {csv_output_path}")
 # Find the row that matches the configuration exactly
-mask = (config_df['nodes_per_layer'].apply(ast.literal_eval) == nodes_per_layer) & \
+'''mask = (config_df['nodes_per_layer'].apply(ast.literal_eval) == nodes_per_layer) & \
        (config_df['activation_function'] == args.activation) & \
        (config_df['learning_rate'] == args.learning_rate) & \
        (config_df['batch_size'] == args.batch_size) & \
@@ -380,7 +506,7 @@ else:
     print("No matching configuration found to update.")
 
 # Save the updated DataFrame back to CSV
-config_df.to_csv('configurations.csv', index=False)
+config_df.to_csv('configurations.csv', index=False)'''
 
 
 
