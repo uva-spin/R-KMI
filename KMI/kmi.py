@@ -29,6 +29,17 @@ def get_data():
     df = pd.read_csv(datafile, dtype=np.float32)
     return df
 
+# filtering the unique set values to prevent overfitting    
+def filter_unique_sets(data):
+    unique_sets = set()
+    filtered_data = {key: [] for key in data.keys()}
+    for i in range(len(data['set'])):
+        if data['set'][i] not in unique_sets:
+            unique_sets.add(data['set'][i])
+            for key in data.keys():
+    filtered_data = {key: np.array(value) for key, value in filtered_data.items()}
+    return filtered_data
+
 # Normalize QQ, xB, t
 def normalize(QQ, xB, t):
     QQ_norm = -1 + 2 * (QQ / 10) 
@@ -67,6 +78,8 @@ def rchi2_Loss(kin, pars, F_data, F_err):
 
 def fit_replica(i, pseudo):
     # ----- prepare input data -----------  
+    pseduo = filter_unique_sets(pseudo)
+    
     if replica:        
         data = gen_replica(pseudo) # generate replica
     else:
@@ -240,7 +253,8 @@ def fit_replica(i, pseudo):
     
     plt.show()   
 
-pseudo = get_data()  
+pseudo = get_data()
+pseduo = filter_unique_sets(pseudo)
 
 print(pseudo)
 
