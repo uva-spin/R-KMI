@@ -50,10 +50,25 @@ cross_validation = True
 
 datafile = '/sfs/qumulo/qhome/lba9wf/R-KMI/Pseudodata/pseudo_basic_BKM10_Jlab_all_t2.csv'
 epochs = args.epochs
+    
+def filter_unique_set_values(data):
+    unique_indices = set()
+    filtered_data = {key: [] for key in data.keys()}
+    for i in range(len(data['set'])):
+        if data['set'][i] not in unique_indices:
+            unique_indices.add(data['set'][i])
+            for key in data.keys():
+                filtered_data[key].append(data[key][i])
+    # Convert lists to NumPy arrays
+    filtered_data = {key: np.array(value) for key, value in filtered_data.items()}
+    return filtered_data
+
+
 
 # get (pseudo)data file
 def get_data():
     df = pd.read_csv(datafile, dtype=np.float32)
+    #df = df.drop_duplicates(subset='set', keep='first')
     return df
 
 # Normalize QQ, xB, t
@@ -72,23 +87,6 @@ def gen_replica(pseudo):
                     'phi': pseudo['phi'], 'F': F_rep,'errF': errF_rep}       
     return replica_dict
 
-'''def build_model():
-    model = tf.keras.Sequential()
-    tf.keras.layers.Dense(40, activation="sigmoid", input_shape=(3,)),
-    for _ in range(args.layers - 1):  # Assuming one input layer and args.layers-1 hidden layers
-        tf.keras.layers.Dense(nodes, activation=activation_function),
-    model.add(tf.keras.layers.Dense(4, activation="linear"))  # Output layer
-    return model'''
-    
-'''def build_model():
-    model = tf.keras.Sequential
-    nodes_per_layer = ast.literal_eval(args.nodes_per_layer)
-    model.add(tf.keras.layers.Dense(nodes_per_layer[0], activation=args.activation, input_shape=(3,)))
-    for nodes in nodes_per_layer[1:]:
-        model.add(tf.keras.layers.Dense(nodes, activation=args.activation))
-    # Add the output layer
-    model.add(tf.keras.layers.Dense(4, activation='linear'))
-    return model'''
     
 def build_model():
     model = tf.keras.Sequential()
@@ -108,28 +106,6 @@ def build_model():
     model.add(tf.keras.layers.Dense(4, activation='linear'))
     
     return model
-    
-'''def build_model():
-    # model 75, info path: /media/lily/Data/GPDs/ANN/KMI/tunning/kt_RS
-    for _ in range(args.layers - 1):
-        model = tf.keras.Sequential([
-            tf.keras.layers.Dense(40, activation="sigmoid", input_shape=(3,)), 
-            tf.keras.layers.Dense(180, activation="tanhshrink"),
-            tf.keras.layers.Dense(130, activation="tanh"),
-            tf.keras.layers.Dense(20, activation="tanh"),
-            tf.keras.layers.Dense(4, activation="linear") # ReH, ReE, ReHt, dvcs
-        ])    
-    return model'''
-
-'''def build_model():
-    model = tf.keras.Sequential()
-    model.add(tf.keras.layers.Dense(layers_info[0][0], activation=layers_info[0][1], input_shape=input_shape))
-    # Add subsequent layers
-    for nodes, activation in layers_info[1:]:
-        model.add(tf.keras.layers.Dense(nodes, activation=activation))
-    # Add the output layer
-    model.add(tf.keras.layers.Dense(output_size, activation='linear'))
-    return model'''
 
 # Reduced chi2 custom Loss function (model predicted inside loss)
 def rchi2_Loss(kin, pars, F_data, F_err):
@@ -142,16 +118,32 @@ def rchi2_Loss(kin, pars, F_data, F_err):
 
 def fit_replica(i, pseudo):
     # ----- prepare input data -----------  
+    
     if replica:        
         data = gen_replica(pseudo) # generate replica
     else:
         data = pseudo  
-
+    filtered_pseudo = filter_unique_set_values(pseudo)
+    data = filter_unique_set_values(data)
+    
     kin = np.dstack((data['k'], data['QQ'] , data['xB'], data['t'], data['phi']))
     kin = kin.reshape(kin.shape[1:]) # loss inputs
-    QQ_norm, xB_norm, t_norm = normalize(data['QQ'] , data['xB'], data['t']) 
-    kin3_norm = np.array([QQ_norm, xB_norm, t_norm]).transpose() # model inputs
-    pars_true = np.array([pseudo['ReH'], pseudo['ReE'], pseudo['ReHtilde'], pseudo['dvcs']]).transpose() # true parameters
+    QQ_norm, xB_norm, t_norm = normalize(filtered_pseudo['QQ'], filtered_pseudo['xB'], filtered_pseudo['t']) 
+    kin3_norm_unique = np.array([QQ_norm, xB_norm, t_norm]).transpose() # model inputs
+    
+    kin3_norm = np.zeros_like(kin[:, :3])
+    for i, val in enumerate(data['set']):
+        matching_index = np.where(filtered_pseudo['set'] == val)[0][0]
+        kin3_norm[i] = kin3_norm_unique[matching_index]
+    
+    pars_true_unique = np.array([filtered_pseudo['ReH'], filtered_pseudo['ReE'], filtered_pseudo['ReHtilde'], filtered_pseudo['dvcs']]).transpose()
+    pars_true = np.zeros_like(pars_true_unique)
+    for i, val in enumerate(data['set']):
+        matching_index = np.where(filtered_pseudo['set'] == val)[0][0]
+        pars_true[i] = pars_true_unique[matching_index]    
+        
+    assert len(kin) == len(pars_true) == len(data['F']) == len(data['errF']), "Mismatch in data lengths"
+
     # ---- split train and testing replica data samples ---- 
     if cross_validation:
         rkf = RepeatedKFold(n_splits=10, n_repeats=10, random_state=42)
@@ -241,6 +233,7 @@ def fit_replica(i, pseudo):
         mape_rehtilde.append(pars_mape[2])
         mape_dvcs.append(pars_mape[3])
         mape_total.append(total_mape)
+        total_mape_results.append(total_mape)
         print("Epoch {:03d}: Loss: {:.3f} val_Loss: {:.3f} F_rmse: {:.5f} ReH_mape: {:.5f} ReE_mape: {:.5f} ReHt_mape: {:.5f} dvcs_mape: {:.5f} total_mape: {:.5f}".format(epoch, loss_value, val_loss_value, F_rmse, pars_mape[0], pars_mape[1], pars_mape[2], pars_mape[3], total_mape))
 
         # Reset training metrics at the end of each epoch
@@ -276,56 +269,75 @@ def fit_replica(i, pseudo):
     np.save(f'{args.output_dir}/models/final_predictions_replica_{i}.npy', final_predictions)
     
     predictions_results = np.array(predictions_results)
+    os.makedirs(f'{args.output_dir}/images', exist_ok=True)
     
-    # Draw loss metrics and predition for only the first set for visualization as a function of the number of epochs.
+    predictions_results = np.array(predictions_results)
+
     fig, axes = plt.subplots(3, sharex=True, figsize=(14, 10))
     fig.suptitle('Training Metrics')
-
-    # loss vs epoch
+    
+    # Loss vs Epoch
     axes[0].set_ylabel("Loss", fontsize=14)
-    axes[0].plot(train_loss_results)
-    axes[0].plot(val_loss_results)
+    axes[0].plot(train_loss_results, label="Training Loss")
+    axes[0].plot(val_loss_results, label="Validation Loss")
+    axes[0].legend()  # Add legend here
+    
+    # F_RMSE vs Epoch
     axes[1].set_ylabel("F_RMSE", fontsize=14)
-    axes[1].plot(F_rmse_results)
-    axes[2].plot(total_mape_results)
+    axes[1].plot(F_rmse_results, label="F RMSE")
+    axes[1].legend()  # Add legend here
+    
+    # Average Pars MAPE vs Epoch
+    axes[2].plot(total_mape_results, label="Avg Pars MAPE")
     axes[2].set_ylabel("Average Pars MAPE", fontsize=14)
+    axes[2].legend()  # Add legend here
     axes[2].set_xlabel("Epoch", fontsize=14)
-
-    # Draw pars mape vs epoch
-    fig, axs = plt.subplots(2, 2, figsize=(20, 15), sharey=False, tight_layout=True)
-    axs[0,0].plot(ReH_mape_results, label = 'mape')
-    axs[0,1].plot(ReE_mape_results, label = 'mape')
-    axs[1,0].plot(ReHt_mape_results, label = 'mape')
-    axs[1,1].plot(dvcs_mape_results, label = 'mape')
-    axs[0,0].legend(title = 'set 1')
-    axs[0,0].set_ylabel("$\mathfrak{Re}\mathcal{H}$_mape", fontsize = 18)
-    axs[0,1].set_ylabel("$\mathfrak{Re}\mathcal{E}$_mape", fontsize = 18)
-    axs[1,0].set_ylabel("$\mathfrak{Re}\mathcal{\widetilde{H}}$_mape", fontsize = 18)
-    axs[1,1].set_ylabel("$dvcs$_mape", fontsize = 18)
-
-    # Draw pars pred vs epoch
-    fig2, axs2 = plt.subplots(2, 2, figsize=(20, 15), sharey=False, tight_layout=True)
-    xepoch = range(0, epoch+1, 10) 
-    axs2[0,0].plot(xepoch, predictions_results[:,:,0], label = 'prediction')
-    axs2[0,0].axhline(y = pseudo['ReH'][0], color = 'r', label = 'true = '+ str('%.3g' % pseudo['ReH'][0]))
-    axs2[0,1].plot(xepoch, predictions_results[:,:,1], label = 'prediction')
-    axs2[0,1].axhline(y = pseudo['ReE'][0], color = 'r', label = 'true = '+ str('%.3g' % pseudo['ReE'][0]))
-    axs2[1,0].plot(xepoch, predictions_results[:,:,2], label = 'prediction')
-    axs2[1,0].axhline(y = pseudo['ReHtilde'][0], color = 'r', label = 'true = '+ str('%.3g' % pseudo['ReHtilde'][0]))
-    axs2[1,1].plot(xepoch, predictions_results[:,:,3], label = 'prediction')
-    axs2[1,1].axhline(y = pseudo['dvcs'][0], color = 'r', label = 'true = '+ str('%.3g' % pseudo['dvcs'][0]))
-    axs2[0,0].legend(title = 'set 1')
-    axs2[0,0].set_ylabel("$\mathfrak{Re}\mathcal{H}$", fontsize = 18)
-    axs2[0,1].set_ylabel("$\mathfrak{Re}\mathcal{E}$", fontsize = 18)
-    axs2[1,0].set_ylabel("$\mathfrak{Re}\mathcal{\widetilde{H}}$", fontsize = 18)
-    axs2[1,1].set_ylabel("$dvcs$", fontsize = 18)
+    
+    # Save the Training Metrics Plot
+    plt.savefig(f'{args.output_dir}/images/Training_Metrics.png')
 
     
-    os.makedirs(f'{args.output_dir}/images', exist_ok=True)
-    plt.savefig(f'{args.output_dir}/images/image.png')
+    # Draw pars MAPE vs epoch
+    fig, axs = plt.subplots(2, 2, figsize=(20, 15), sharey=False, tight_layout=True)
+    axs[0,0].plot(ReH_mape_results, label = 'ReH MAPE', color='blue')
+    axs[0,1].plot(ReE_mape_results, label = 'ReE MAPE', color='orange')
+    axs[1,0].plot(ReHt_mape_results, label = 'ReHt MAPE', color='green')
+    axs[1,1].plot(dvcs_mape_results, label = 'dvcs MAPE', color='red')
+    
+    # Ensure that legends and labels are added
+    for ax in axs.flat:
+        ax.legend()
+        ax.set_xlabel("Epoch", fontsize=14)
+        ax.set_ylabel("MAPE", fontsize=14)
+    
+    # Save the second figure (MAPE for Each Parameter)
+    plt.savefig(f'{args.output_dir}/images/MAPE_Per_Parameter.png')
+    
+    # Draw pars pred vs epoch
+    fig2, axs2 = plt.subplots(2, 2, figsize=(20, 15), sharey=False, tight_layout=True)
+    xepoch = range(0, epoch+1, 10)
+    
+    axs2[0,0].plot(xepoch, predictions_results[:,:,0], label = 'ReH Prediction', color='blue')
+    axs2[0,0].axhline(y = pseudo['ReH'][0], color = 'r', label = 'True ReH')
+    axs2[0,1].plot(xepoch, predictions_results[:,:,1], label = 'ReE Prediction', color='orange')
+    axs2[0,1].axhline(y = pseudo['ReE'][0], color = 'r', label = 'True ReE')
+    axs2[1,0].plot(xepoch, predictions_results[:,:,2], label = 'ReHt Prediction', color='green')
+    axs2[1,0].axhline(y = pseudo['ReHtilde'][0], color = 'r', label = 'True ReHt')
+    axs2[1,1].plot(xepoch, predictions_results[:,:,3], label = 'dvcs Prediction', color='red')
+    axs2[1,1].axhline(y = pseudo['dvcs'][0], color = 'r', label = 'True dvcs')
+    
+    # Ensure that legends and labels are added
+    for ax in axs2.flat:
+        ax.legend()
+        ax.set_xlabel("Epoch", fontsize=14)
+        ax.set_ylabel("Prediction", fontsize=14)
+    
+    # Save the third figure (Predictions vs. True Values)
+    plt.savefig(f'{args.output_dir}/images/Predictions_vs_True_Values.png')
+
 
 pseudo = get_data()  
-
+pseudo = filter_unique_set_values(pseudo)
 print(pseudo)
 
 kin = np.dstack((pseudo['k'], pseudo['QQ'] , pseudo['xB'], pseudo['t'], pseudo['phi']))
@@ -412,6 +424,9 @@ def plot_and_save_scatter_with_error_bars(predictions, real_values, label, title
 
     # Plot predicted values with error bars
     x_values = np.arange(len(mean_predictions))
+    
+    print(f"x_values shape: {x_values.shape}")
+    print(f"real_values shape: {real_values.shape}")
     plt.errorbar(x_values, mean_predictions, yerr=std_predictions, fmt='o', label=f'Predicted {label} (mean ± std)', color='blue', alpha=0.7)
 
     # Plot actual values as scatter points
